@@ -163,12 +163,13 @@ func paint(img wde.Image, fn string) error {
 		return fmt.Errorf("%d:%d: %s", s.Line, s.Column, fmt.Sprintf(t, args...))
 	}
 
-	g := draw2d.NewGraphicContext(img)
+	buf := image.NewRGBA(img.Bounds())
+	g := draw2d.NewGraphicContext(buf)
 
 	for {
 		t := s.Scan()
 		if t == scanner.EOF {
-			return nil
+			break
 		}
 		//log.Printf(" TOKEN '%s'\n", s.TokenText())
 		switch t := s.TokenText(); t {
@@ -203,4 +204,7 @@ func paint(img wde.Image, fn string) error {
 			return bad("unknown command '%s'", t)
 		}
 	}
+
+	img.CopyRGBA(buf, img.Bounds())
+	return nil
 }
