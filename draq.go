@@ -1,9 +1,12 @@
 package main
 
 import (
+	"errors"
 	"log"
+	"os"
 
-	"github.com/skelterjohn/go.wde"
+	"code.google.com/p/go.exp/fsnotify"
+	"github.com/skelterjohn/go.wde" //FIXME: use a custom fork, based on non-cgo w32 package fork
 )
 
 func main() {
@@ -12,13 +15,32 @@ func main() {
 }
 
 func main2() {
+	defer wde.Stop()
 	err := run()
 	if err != nil {
-		log.Println(err.Error())
+		log.Println("error:", err.Error())
 	}
-	wde.Stop()
 }
 
+//FIXME: describe the format of FILENAME contents, and file watching behavior
+var usage = errors.New(`USAGE: draq FILENAME`)
+
 func run() error {
-	return nil
+	if len(os.Args) < 2 {
+		return usage
+	}
+
+	w, err := fsnotify.NewWatcher()
+	if err != nil {
+		return err
+	}
+
+	fn := os.Args[1]
+	log.Printf("Watching '%s' for changes...\n", fn)
+	go watch(w, fn)
+	err = w.Watch(fn)
+	return err
+}
+
+func watch(watcher *fsnotify.Watcher, fn string) {
 }
