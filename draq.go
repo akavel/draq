@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"code.google.com/p/go.exp/fsnotify"
 	//"github.com/howeyc/fsnotify"
@@ -50,9 +51,10 @@ func run() error {
 func watch(watcher *fsnotify.Watcher, fn string, q chan<- struct{}) {
 	defer func() { q <- struct{}{} }()
 
+	exit := make(chan struct{}, 1)
 	repaint := make(chan struct{}, 1)
 	// FIXME: handle errors in painter()
-	go painter(fn, repaint)
+	go painter(fn, repaint, exit)
 	repaint <- struct{}{}
 
 	for {
@@ -76,21 +78,56 @@ func watch(watcher *fsnotify.Watcher, fn string, q chan<- struct{}) {
 				break
 			}
 
-			select { // raise signal that repaint is needed, unless already queued
-			case repaint <- struct{}{}:
-			default:
-			}
+			raise(repaint)
 		case err := <-watcher.Error:
 			log.Println("error:", err)
+			watcher.Close()
+			return
+		case <-exit:
 			watcher.Close()
 			return
 		}
 	}
 }
 
-func painter(fn string, signal <-chan struct{}) {
+func painter(fn string, signal chan struct{}, exit chan<- struct{}) {
+	defer func() { exit <- struct{}{} }()
+
+	var sizelock sync.Mutex
+	w, h := 640, 480
+
+	win, err := wde.NewWindow(w, h) // FIXME: set w&h via commandline flags
+	if err != nil {
+		panic(err)
+	}
+	win.Show()
+
+	go func() {
+		for {
+			e := <-win.EventChan()
+			switch e := e.(type) {
+			case wde.CloseEvent:
+				exit <- struct{}{}
+				return
+			case wde.ResizeEvent:
+				sizelock.Lock()
+				w, h = e.Width, e.Height
+				sizelock.Unlock()
+				raise(signal)
+			}
+		}
+	}()
+
 	for {
 		<-signal
 		log.Println("repaint!")
+	}
+}
+
+// raise signal, unless already raised
+func raise(signal chan<- struct{}) {
+	select {
+	case signal <- struct{}{}:
+	default:
 	}
 }
