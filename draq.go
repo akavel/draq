@@ -100,6 +100,11 @@ func painter(fn string, signal chan struct{}, exit chan<- struct{}) {
 	if err != nil {
 		panic(err)
 	}
+	abs, err := filepath.Abs(fn)
+	if err != nil {
+		abs = fn
+	}
+	win.SetTitle(abs + " - draq")
 	win.Show()
 
 	go func() {
