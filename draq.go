@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"image"
+	"image/color"
 	"log"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"sync"
 	"text/scanner"
 
+	"code.google.com/p/draw2d/draw2d" //FIXME: what the license? it claims to use AGG...
 	"code.google.com/p/go.exp/fsnotify"
 	//"github.com/howeyc/fsnotify"
 	"github.com/skelterjohn/go.wde" //FIXME: use a custom fork, based on non-cgo w32 package fork
@@ -161,7 +163,7 @@ func paint(img wde.Image, fn string) error {
 		return fmt.Errorf("%d:%d: %s", s.Line, s.Column, fmt.Sprintf(t, args...))
 	}
 
-	var fg, bg int32
+	g := draw2d.NewGraphicContext(img)
 
 	for {
 		t := s.Scan()
@@ -176,21 +178,29 @@ func paint(img wde.Image, fn string) error {
 			if len(val) != 6 && len(val) != 8 {
 				return bad(t + " COLOR: COLOR must be RRGGBB or RRGGBBAA")
 			}
-			color, err := strconv.ParseInt(val, 16, 32)
+			c, err := strconv.ParseInt(val, 16, 32)
 			if err != nil {
 				return bad(t+" COLOR: %s", err.Error())
 			}
+			uc := uint32(c)
 			if len(val) == 6 {
-				color = color << 8
+				uc = uc << 8
+			}
+			cc := color.RGBA{
+				R: uint8(uc >> 24),
+				G: uint8(uc >> 16),
+				B: uint8(uc >> 8),
+				A: uint8(uc),
 			}
 			if t == "bg" {
-				bg = int32(color)
+				g.SetFillColor(cc)
 			} else {
-				fg = int32(color)
+				g.SetStrokeColor(cc)
 			}
+		case "clear":
+			g.Clear()
 		default:
 			return bad("unknown command '%s'", t)
 		}
-		_, _ = bg, fg
 	}
 }
