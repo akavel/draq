@@ -2,10 +2,14 @@ package main
 
 import (
 	"errors"
+	"fmt"
+	"image"
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
+	"text/scanner"
 
 	"code.google.com/p/go.exp/fsnotify"
 	//"github.com/howeyc/fsnotify"
@@ -126,6 +130,12 @@ func painter(fn string, signal chan struct{}, exit chan<- struct{}) {
 	for {
 		<-signal
 		log.Println("repaint!")
+		err := paint(win.Screen(), fn)
+		if err != nil {
+			log.Println("error:", err.Error())
+			continue
+		}
+		win.FlushImage(image.Rectangle{Max: image.Point{w, h}})
 	}
 }
 
@@ -134,5 +144,53 @@ func raise(signal chan<- struct{}) {
 	select {
 	case signal <- struct{}{}:
 	default:
+	}
+}
+
+func paint(img wde.Image, fn string) error {
+	f, err := os.Open(fn)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	s := scanner.Scanner{}
+	s.Init(f)
+
+	bad := func(t string, args ...interface{}) error {
+		return fmt.Errorf("%d:%d: %s", s.Line, s.Column, fmt.Sprintf(t, args...))
+	}
+
+	var fg, bg int32
+
+	for {
+		t := s.Scan()
+		if t == scanner.EOF {
+			return nil
+		}
+		//log.Printf(" TOKEN '%s'\n", s.TokenText())
+		switch t := s.TokenText(); t {
+		case "bg", "fg":
+			s.Scan()
+			val := s.TokenText()
+			if len(val) != 6 && len(val) != 8 {
+				return bad(t + " COLOR: COLOR must be RRGGBB or RRGGBBAA")
+			}
+			color, err := strconv.ParseInt(val, 16, 32)
+			if err != nil {
+				return bad(t+" COLOR: %s", err.Error())
+			}
+			if len(val) == 6 {
+				color = color << 8
+			}
+			if t == "bg" {
+				bg = int32(color)
+			} else {
+				fg = int32(color)
+			}
+		default:
+			return bad("unknown command '%s'", t)
+		}
+		_, _ = bg, fg
 	}
 }
