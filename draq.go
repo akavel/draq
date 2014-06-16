@@ -10,12 +10,13 @@ import (
 	"path/filepath"
 	"strconv"
 	"sync"
-	"text/scanner"
 
 	"code.google.com/p/draw2d/draw2d" //FIXME: what the license? it claims to use AGG...
 	"code.google.com/p/go.exp/fsnotify"
 	//"github.com/howeyc/fsnotify"
 	"github.com/skelterjohn/go.wde" //FIXME: use a custom fork, based on non-cgo w32 package fork
+
+	"github.com/akavel/draq/util"
 )
 
 func main() {
@@ -156,26 +157,25 @@ func paint(img wde.Image, fn string) error {
 	}
 	defer f.Close()
 
-	s := scanner.Scanner{}
-	s.Init(f)
+	s := util.NewScanner(f)
 
 	bad := func(t string, args ...interface{}) error {
-		return fmt.Errorf("%d:%d: %s", s.Line, s.Column, fmt.Sprintf(t, args...))
+		return fmt.Errorf("%d:%d: %s", s.S.Line, s.S.Column, fmt.Sprintf(t, args...))
 	}
 
 	buf := image.NewRGBA(img.Bounds())
 	g := draw2d.NewGraphicContext(buf)
 
 	for {
-		t := s.Scan()
-		if t == scanner.EOF {
+		t, eof := s.Cmd()
+		if eof {
 			break
 		}
 		//log.Printf(" TOKEN '%s'\n", s.TokenText())
-		switch t := s.TokenText(); t {
+		switch t {
 		case "bg", "fg":
-			s.Scan()
-			val := s.TokenText()
+			s.S.Scan()
+			val := s.S.TokenText()
 			if len(val) != 6 && len(val) != 8 {
 				return bad(t + " COLOR: COLOR must be RRGGBB or RRGGBBAA")
 			}
@@ -200,6 +200,9 @@ func paint(img wde.Image, fn string) error {
 			}
 		case "clear":
 			g.Clear()
+		//case "mv":
+		//	x, y :=
+		//	g.MoveTo(
 		default:
 			return bad("unknown command '%s'", t)
 		}
