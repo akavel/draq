@@ -4,28 +4,28 @@ import (
 	"errors"
 	"fmt"
 	"image"
-	"image/color"
+	"image/draw"
 	"log"
 	"os"
 	"path/filepath"
-	"strconv"
 	"sync"
 
 	"code.google.com/p/draw2d/draw2d" //FIXME: what the license? it claims to use AGG...
 	"code.google.com/p/go.exp/fsnotify"
 	//"github.com/howeyc/fsnotify"
-	"github.com/skelterjohn/go.wde" //FIXME: use a custom fork, based on non-cgo w32 package fork
+	"github.com/andlabs/ui"
 
 	"github.com/akavel/draq/util"
 )
 
 func main() {
-	go main2()
-	wde.Run()
+	err := ui.Go(main2)
+	if err != nil {
+		log.Println("GUI error:", err.Error())
+	}
 }
 
 func main2() {
-	defer wde.Stop()
 	err := run()
 	if err != nil {
 		log.Println("error:", err.Error())
@@ -97,48 +97,75 @@ func watch(watcher *fsnotify.Watcher, fn string, q chan<- struct{}) {
 	}
 }
 
+type BlitArea struct {
+	m   sync.Mutex
+	img *image.RGBA
+}
+
+func (*BlitArea) Mouse(e ui.MouseEvent) (repaint bool) { return false }
+func (*BlitArea) Key(e ui.KeyEvent) (repaint bool)     { return false }
+func (a *BlitArea) Paint(region image.Rectangle) *image.RGBA {
+	a.m.Lock()
+	img := a.img
+	a.m.Unlock()
+
+	b := img.Bounds()
+	if region.Max.X <= b.Max.X && region.Max.Y <= b.Max.Y {
+		return img.SubImage(region).(*image.RGBA)
+	}
+
+	fake := image.NewRGBA(region)
+	draw.Draw(fake, region, img, image.ZP, draw.Over) //FIXME: ok or not?
+	return fake
+}
+
+//NOTE: drawing on 'img' is not safe afterwards till next Swap()
+func (a *BlitArea) Swap(img *image.RGBA) *image.RGBA {
+	a.m.Lock()
+	old := a.img
+	a.img = img
+	a.m.Unlock()
+
+	return old
+}
+
 func painter(fn string, signal chan struct{}, exit chan<- struct{}) {
 	defer func() { exit <- struct{}{} }()
 
-	var sizelock sync.Mutex
-	w, h := 640, 480
+	RECT := image.Rectangle{image.Pt(0, 0), image.Pt(640, 480)}
 
-	win, err := wde.NewWindow(w, h) // FIXME: set w&h via commandline flags
-	if err != nil {
-		panic(err)
+	area := BlitArea{
+		img: image.NewRGBA(RECT),
 	}
+	warea := ui.NewArea(640, 480, &area)
+
 	abs, err := filepath.Abs(fn)
 	if err != nil {
 		abs = fn
 	}
-	win.SetTitle(abs + " - draq")
-	win.Show()
 
-	go func() {
-		for {
-			e := <-win.EventChan()
-			switch e := e.(type) {
-			case wde.CloseEvent:
-				exit <- struct{}{}
-				return
-			case wde.ResizeEvent:
-				sizelock.Lock()
-				w, h = e.Width, e.Height
-				sizelock.Unlock()
-				raise(signal)
-			}
-		}
-	}()
+	win := ui.NewWindow(abs+" - draq", 640, 480)
+	ui.AppQuit = win.Closing // treat quitting the application like closing the main window
+	win.Open(warea)
 
+	buf := image.NewRGBA(RECT)
 	for {
-		<-signal
+		select {
+		case <-win.Closing:
+			return
+		case <-signal:
+		}
 		log.Println("repaint!")
-		err := paint(win.Screen(), fn)
+
+		err := paint(&buf, fn)
 		if err != nil {
 			log.Println("error:", err.Error())
 			continue
 		}
-		win.FlushImage(image.Rectangle{Max: image.Point{w, h}})
+
+		size := buf.Bounds()
+		buf = area.Swap(buf)
+		warea.SetSize(size.Max.X, size.Max.Y) // calls RepaintAll() undercover
 	}
 }
 
@@ -150,64 +177,102 @@ func raise(signal chan<- struct{}) {
 	}
 }
 
-func paint(img wde.Image, fn string) error {
+func paint(img **image.RGBA, fn string) error {
 	f, err := os.Open(fn)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
 
-	s := util.NewScanner(f)
-
-	bad := func(t string, args ...interface{}) error {
-		return fmt.Errorf("%d:%d: %s", s.S.Line, s.S.Column, fmt.Sprintf(t, args...))
+	p := util.Parser{
+		Scanner: util.NewScanner(f),
 	}
 
-	buf := image.NewRGBA(img.Bounds())
+	bad := func(t string, args ...interface{}) error {
+		return fmt.Errorf("%d: %s", p.Scanner.Offset, fmt.Sprintf(t, args...))
+	}
+
+	//buf := image.NewRGBA(img.Bounds())
+	buf := *img
 	g := draw2d.NewGraphicContext(buf)
 
+	//tmp := image.NewRGBA(region)
+
+	var lastpath *draw2d.PathStorage
 	for {
-		t, eof := s.Cmd()
+		t, eof := p.Cmd()
 		if eof {
 			break
 		}
 		//log.Printf(" TOKEN '%s'\n", s.TokenText())
 		switch t {
 		case "bg", "fg":
-			s.S.Scan()
-			val := s.S.TokenText()
-			if len(val) != 6 && len(val) != 8 {
-				return bad(t + " COLOR: COLOR must be RRGGBB or RRGGBBAA")
-			}
-			c, err := strconv.ParseInt(val, 16, 32)
+			c, err := p.Color()
 			if err != nil {
-				return bad(t+" COLOR: %s", err.Error())
-			}
-			uc := uint32(c)
-			if len(val) == 6 {
-				uc = uc << 8
-			}
-			cc := color.RGBA{
-				R: uint8(uc >> 24),
-				G: uint8(uc >> 16),
-				B: uint8(uc >> 8),
-				A: uint8(uc),
+				return bad(t + " COLOR: " + err.Error())
 			}
 			if t == "bg" {
-				g.SetFillColor(cc)
+				g.SetFillColor(c)
 			} else {
-				g.SetStrokeColor(cc)
+				g.SetStrokeColor(c)
 			}
 		case "clear":
 			g.Clear()
-		//case "mv":
-		//	x, y :=
-		//	g.MoveTo(
+
+		case "mv":
+			x, y, err := p.Point()
+			if err != nil {
+				return bad(t + " " + err.Error())
+			}
+			g.MoveTo(x, y)
+		case "ln":
+			x, y, err := p.Point()
+			if err != nil {
+				return bad(t + " " + err.Error())
+			}
+			g.LineTo(x, y)
+		case "qd":
+			x1, y1, err := p.Point()
+			if err != nil {
+				return bad(t + " POINT 1: " + err.Error())
+			}
+			x2, y2, err := p.Point()
+			if err != nil {
+				return bad(t + " POINT 2: " + err.Error())
+			}
+			g.QuadCurveTo(x1, y1, x2, y2)
+		case "cb":
+			x1, y1, err := p.Point()
+			if err != nil {
+				return bad(t + " POINT 1: " + err.Error())
+			}
+			x2, y2, err := p.Point()
+			if err != nil {
+				return bad(t + " POINT 2: " + err.Error())
+			}
+			x3, y3, err := p.Point()
+			if err != nil {
+				return bad(t + " POINT 3: " + err.Error())
+			}
+			g.CubicCurveTo(x1, y1, x2, y2, x3, y3)
+
+		case "stroke", "fill":
+			if g.Current.Path.IsEmpty() {
+				g.Current.Path = lastpath
+			} else {
+				lastpath = g.Current.Path.Copy()
+			}
+			switch t {
+			case "stroke":
+				g.Stroke()
+			case "fill":
+				g.Fill()
+			}
+
 		default:
 			return bad("unknown command '%s'", t)
 		}
 	}
 
-	img.CopyRGBA(buf, img.Bounds())
 	return nil
 }
